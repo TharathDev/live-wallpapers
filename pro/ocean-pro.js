@@ -229,7 +229,7 @@ fn wakeFoam(lp: vec2f) -> vec3f {
     churn = max(churn, core * exp(-max(ss, 0.0) * 0.2));
     trail = core * fade * 0.75;
     // the whole wake band (both streams and between) stays aerated a while longer
-    let band = exp(-pow(az / (HB * 1.1 + max(ss, 0.0) * 0.045), 2.0)) * smoothstep(-0.5, 0.4, ss);
+    let band = exp(-pow(az / (HB * 1.1 + max(ss, 0.0) * 0.045), 2.0)) * smoothstep(-2.0, 4.0, ss);
     aer = band * exp(-age * B.plan.z * 0.6);
   }
   // thin foam lines along the bow-wave arms
