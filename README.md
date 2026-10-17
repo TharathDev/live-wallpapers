@@ -14,6 +14,18 @@ You can use **your own realistic 3D boat models** (`.glb`). Each boat slot uses 
 | **Fishing boat, overcast, deck view** | **Sailing yacht, clear day, chase view** |
 | ![](docs/fishing.jpg) | ![](docs/sailboat.jpg) |
 
+## Two renderers
+
+- **Realistic** (`pro/`): best for videos, and the default for the GitHub video workflow. It's built on [web-ocean](https://github.com/Noniv/web-ocean)'s renderer, with an FFT wave simulation, a physically based sky and clouds, real foam, sun glitter and bloom. It adds:
+  - a 3D boat lit by the sun and sky, with shadows;
+  - a wake made of churn along the hull, twin prop wash, bow-wave lines and turquoise aerated water;
+  - frame-exact seamless loops.
+
+  It needs WebGPU (Chrome or Edge 113+, or Safari 26) and a strong GPU to run live, so it's mainly for rendering videos. To preview it live, open `pro/index.html?live=1`.
+- **Basic** (`index.html`): the lighter WebGL wallpaper described below. It runs live on any laptop and has all four built-in boats.
+
+In the realistic renderer, the motor yacht is built in. The galleon, fishing boat and sailboat need a 3D model; see [Use real 3D boat models](#use-real-3d-boat-models). Its scenes are `tropical`, `golden`, `clear`, `overcast`, `sunset` and `storm`. It doesn't have `night`.
+
 ## Boats, scenes and cameras
 
 Everything can be mixed. Each boat starts with the scene and camera that suit it best.
@@ -95,7 +107,7 @@ Point your wallpaper app at `index.html` with the options you like, for example 
   3. In Muro, import that `.mp4` as your own video.
 
   The video is H.264 at your screen's full resolution and 30 fps. It holds exactly one loop and leaves out the duplicate seam frame, so it repeats with no visible jump. Use a 30-second loop (`?loop=30`) for a smaller file. Change the frame rate with `?recfps=60` and the size with `?recw=2560&rech=1600`.
-- **Let GitHub render the video for you:** open the repository's **Actions** tab, choose **Render wallpaper video**, then **Run workflow**. Pick the boat, scene, camera, loop length and your screen size. GitHub renders the frames in software and splits them across many machines, so it takes about 15 to 60 minutes. Larger sizes and 60-second loops take longer. The finished `.mp4`:
+- **Let GitHub render the video for you:** open the repository's **Actions** tab, choose **Render wallpaper video**, then **Run workflow**. Pick the renderer, boat, scene, camera, loop length and your screen size. GitHub renders the frames in software and splits them across many machines. With the realistic renderer, a 30-second loop at 2560×1600 takes roughly an hour; larger sizes and 60-second loops take longer. The finished `.mp4`:
   - is committed to the `result/` folder, if it is under 95 MB, GitHub's file size limit;
   - is attached to the [**videos** release](../../releases/tag/videos), for any size, with a direct download link;
   - is also on the run's page, under *Artifacts*.
@@ -136,6 +148,16 @@ Point your wallpaper app at `index.html` with the options you like, for example 
 - **Foam and clouds:** whitecaps, wake foam, wake turbulence and clouds use noise that moves with the water. Two copies offset by one loop are cross-faded, which repeats with no seam.
 - **Wake:** the bow wave, Kelvin wake arms and prop wash are fixed in the boat's frame, so they never break the loop.
 
+## How the realistic loop closes
+
+In the realistic renderer, the boat really travels forward through a fixed ocean at its speed, and the camera rides along. After one loop, the boat has moved a distance D (speed × loop length). To make the next loop identical, the renderer:
+
+- sizes each FFT wave tile and every world-space foam texture so that it divides D exactly;
+- rounds every wave frequency to a whole number of cycles per loop;
+- keeps the clouds still.
+
+The wake is fixed relative to the boat. Wind whitecaps are simulated, so each render machine first runs 12 seconds of simulation, so the foam settles before the first frame it renders.
+
 ## How it's drawn
 
 Each frame takes three passes:
@@ -149,3 +171,8 @@ three.js and [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) are bundled in `
 ## Performance
 
 The ocean is a full-screen ray-marched shader. The resolution adapts automatically to hold a steady frame rate, and rendering pauses when the page is hidden. The galleon, with all its sails, is the heaviest boat. On a laptop with integrated graphics, try `?fps=30` or `?scale=0.6`.
+
+## Third-party code
+
+- `pro/src/wgsl/` and much of `pro/src/main.js` are adapted from [web-ocean](https://github.com/Noniv/web-ocean) by Maksymilian Dendura (MIT licence, see `pro/LICENSE-web-ocean`).
+- `vendor/three.bundle.js` is [three.js](https://threejs.org) (MIT), and `vendor/mp4-muxer.js` is [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) (MIT).

@@ -6,7 +6,8 @@
     "build-three": "esbuild three-entry.js --bundle --minify --format=iife --global-name=THREE --outfile=../vendor/three.bundle.js",
     "pack-models": "node pack-models.mjs",
     "build-mp4": "esbuild mp4-entry.js --bundle --minify --format=iife --global-name=Mp4Muxer --outfile=../vendor/mp4-muxer.js",
-    "render-video": "node render-video.mjs"
+    "render-video": "node render-video.mjs",
+    "build-pro": "esbuild ../pro/src/main.js --bundle --format=iife --legal-comments=inline --outfile=../pro/ocean-pro.js"
   },
   "devDependencies": {
     "esbuild": "0.24.0",

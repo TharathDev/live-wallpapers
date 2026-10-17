@@ -2,20 +2,26 @@
 # wallpaper apps) and stores it in result/ and in the "videos" release.
 #
 # Start it from the Actions tab: "Render wallpaper video" → "Run workflow".
-# GitHub's machines have no GPU, so frames are rendered in software (roughly 10 s per 1080p
-# frame); the work is split across many machines in parallel and joined at the end.
+# GitHub's machines have no GPU, so frames are rendered in software (the realistic renderer
+# takes roughly 30 s per 2560x1600 frame); the work is split across many machines in
+# parallel and joined at the end.
 name: Render wallpaper video
 
 on:
   workflow_dispatch:
     inputs:
+      renderer:
+        description: Renderer ("realistic" is the WebGPU ocean; "basic" is the lighter WebGL one)
+        type: choice
+        options: [realistic, basic]
+        default: realistic
       boat:
-        description: Boat
+        description: Boat (realistic renderer - galleon, fishing and sailboat need a model in models/)
         type: choice
         options: [yacht, galleon, fishing, sailboat]
         default: yacht
       scene:
-        description: Sky and sea ("default" uses the boat's own)
+        description: Sky and sea ("default" uses the boat's own; night is basic renderer only)
         type: choice
         options: [default, tropical, golden, overcast, clear, sunset, storm, night]
         default: default
@@ -58,8 +64,10 @@ jobs:
       width: ${{ steps.plan.outputs.width }}
       height: ${{ steps.plan.outputs.height }}
     steps:
+      - uses: actions/checkout@v4
       - id: plan
         env:
+          RENDERER: ${{ inputs.renderer }}
           BOAT: ${{ inputs.boat }}
           SCENE: ${{ inputs.scene }}
           VIEW: ${{ inputs.view }}
@@ -74,21 +82,32 @@ jobs:
             yacht) ds=tropical dv=drone ;; galleon) ds=golden dv=side ;;
             fishing) ds=overcast dv=deck ;; sailboat) ds=clear dv=chase ;;
           esac
+          if [ "$RENDERER" = realistic ]; then
+            if [ "$SCENE" = night ]; then echo "::error::the night scene is only in the basic renderer"; exit 1; fi
+            if [ "$BOAT" != yacht ] && ! grep -q "OCEAN_MODELS\[\"$BOAT\"\]" models/models.js; then
+              echo "::error::the realistic renderer needs a 3D model for the $BOAT: add models/$BOAT.glb, run node tools/pack-models.mjs and push"; exit 1
+            fi
+          fi
           [ "$SCENE" = default ] && SCENE=$ds
           [ "$VIEW" = default ] && VIEW=$dv
           W=${RES%x*} H=${RES#*x}
           query="boat=$BOAT&scene=$SCENE&view=$VIEW&loop=$LOOP${EXTRA:+&$EXTRA}"
-          name="ocean-run-$BOAT-$SCENE-$VIEW-${LOOP}s-${W}x${H}-${FPS}fps.mp4"
-          # split the frames so each machine renders for about 20 minutes (est. 12 s per 1080p frame)
+          tag=$([ "$RENDERER" = basic ] && echo "-basic" || true)
+          name="ocean-run-$BOAT-$SCENE-$VIEW-${LOOP}s-${W}x${H}-${FPS}fps$tag.mp4"
+          # split the frames so each machine works for about 25 minutes. Software rendering
+          # estimates: realistic ~1 s + 7 s per megapixel per frame, plus ~7 min of warm-up
+          # (the sea's foam settling) per machine; basic ~12 s per 1080p frame.
           shards=$(node -e '
-            const [frames, w, h] = process.argv.slice(1).map(Number);
-            const secs = 12 * (w * h) / (1920 * 1080);
-            let per = Math.max(10, Math.floor(1200 / secs));
+            const [frames, w, h, realistic] = process.argv.slice(1).map(Number);
+            const mp = w * h / 1e6;
+            const secs = realistic ? 1 + 7 * mp : 12 * mp / 2.07;
+            const budget = realistic ? 1500 - 420 : 1500;
+            let per = Math.max(8, Math.floor(budget / secs));
             if (Math.ceil(frames / per) > 64) per = Math.ceil(frames / 64);
             const out = [];
             for (let s = 0, i = 0; s < frames; s += per, i++) out.push({ i, start: s, end: Math.min(frames, s + per) });
             console.log(JSON.stringify(out));
-          ' "$((LOOP * FPS))" "$W" "$H")
+          ' "$((LOOP * FPS))" "$W" "$H" "$([ "$RENDERER" = realistic ] && echo 1 || echo 0)")
           {
             echo "shards=$shards"; echo "frames=$((LOOP * FPS))"; echo "query=$query"
             echo "name=$name"; echo "width=$W"; echo "height=$H"
@@ -123,7 +142,8 @@ jobs:
           START: ${{ matrix.shard.start }}
           END: ${{ matrix.shard.end }}
           IDX: ${{ matrix.shard.i }}
-        run: node render-video.mjs --query "$QUERY" --width "$W" --height "$H" --fps "$FPS" --start "$START" --end "$END" --out "seg-$(printf %03d "$IDX").mp4"
+          RENDERER: ${{ inputs.renderer }}
+        run: node render-video.mjs --renderer "$RENDERER" --query "$QUERY" --width "$W" --height "$H" --fps "$FPS" --start "$START" --end "$END" --out "seg-$(printf %03d "$IDX").mp4"
       - uses: actions/upload-artifact@v4
         with:
           name: seg-${{ matrix.shard.i }}
