@@ -1,0 +1,193 @@
+# Renders one seamless loop of the wallpaper to an .mp4 (H.264, for Muro and other video
+# wallpaper apps) and stores it in result/ and in the "videos" release.
+#
+# Start it from the Actions tab: "Render wallpaper video" → "Run workflow".
+# GitHub's machines have no GPU, so frames are rendered in software (roughly 10 s per 1080p
+# frame); the work is split across many machines in parallel and joined at the end.
+name: Render wallpaper video
+
+on:
+  workflow_dispatch:
+    inputs:
+      boat:
+        description: Boat
+        type: choice
+        options: [yacht, galleon, fishing, sailboat]
+        default: yacht
+      scene:
+        description: Sky and sea ("default" uses the boat's own)
+        type: choice
+        options: [default, tropical, golden, overcast, clear, sunset, storm, night]
+        default: default
+      view:
+        description: Camera ("default" uses the boat's own)
+        type: choice
+        options: [default, chase, drone, side, deck]
+        default: default
+      loop:
+        description: Loop length in seconds
+        type: choice
+        options: ['30', '60']
+        default: '30'
+      resolution:
+        description: Video size (MacBook Air is 2560x1664, MacBook Pro 14" is 3024x1964)
+        type: choice
+        options: ['1920x1080', '2560x1440', '2560x1600', '2560x1664', '2880x1800', '3024x1964', '3840x2160']
+        default: '2560x1600'
+      fps:
+        description: Frames per second
+        type: choice
+        options: ['30', '24', '60']
+        default: '30'
+      extra:
+        description: Extra options, e.g. speed=10&seed=3 (letters, digits, = & . , - only)
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      frames: ${{ steps.plan.outputs.frames }}
+      query: ${{ steps.plan.outputs.query }}
+      name: ${{ steps.plan.outputs.name }}
+      width: ${{ steps.plan.outputs.width }}
+      height: ${{ steps.plan.outputs.height }}
+    steps:
+      - id: plan
+        env:
+          BOAT: ${{ inputs.boat }}
+          SCENE: ${{ inputs.scene }}
+          VIEW: ${{ inputs.view }}
+          LOOP: ${{ inputs.loop }}
+          RES: ${{ inputs.resolution }}
+          FPS: ${{ inputs.fps }}
+          EXTRA: ${{ inputs.extra }}
+        run: |
+          if ! [[ "$EXTRA" =~ ^[A-Za-z0-9=\&.,_-]*$ ]]; then echo "::error::extra options may only use letters, digits and = & . , _ -"; exit 1; fi
+          # each boat's own scene and camera, as in index.html, for the file name
+          case "$BOAT" in
+            yacht) ds=tropical dv=drone ;; galleon) ds=golden dv=side ;;
+            fishing) ds=overcast dv=deck ;; sailboat) ds=clear dv=chase ;;
+          esac
+          [ "$SCENE" = default ] && SCENE=$ds
+          [ "$VIEW" = default ] && VIEW=$dv
+          W=${RES%x*} H=${RES#*x}
+          query="boat=$BOAT&scene=$SCENE&view=$VIEW&loop=$LOOP${EXTRA:+&$EXTRA}"
+          name="ocean-run-$BOAT-$SCENE-$VIEW-${LOOP}s-${W}x${H}-${FPS}fps.mp4"
+          # split the frames so each machine renders for about 20 minutes (est. 12 s per 1080p frame)
+          shards=$(node -e '
+            const [frames, w, h] = process.argv.slice(1).map(Number);
+            const secs = 12 * (w * h) / (1920 * 1080);
+            let per = Math.max(10, Math.floor(1200 / secs));
+            if (Math.ceil(frames / per) > 64) per = Math.ceil(frames / 64);
+            const out = [];
+            for (let s = 0, i = 0; s < frames; s += per, i++) out.push({ i, start: s, end: Math.min(frames, s + per) });
+            console.log(JSON.stringify(out));
+          ' "$((LOOP * FPS))" "$W" "$H")
+          {
+            echo "shards=$shards"; echo "frames=$((LOOP * FPS))"; echo "query=$query"
+            echo "name=$name"; echo "width=$W"; echo "height=$H"
+          } >> "$GITHUB_OUTPUT"
+          echo "Rendering $name: $((LOOP * FPS)) frames on $(echo "$shards" | grep -o '"i"' | wc -l) machines" >> "$GITHUB_STEP_SUMMARY"
+
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Install Playwright and Chromium
+        working-directory: tools
+        run: npm install --no-audit --no-fund && npx playwright install --with-deps chromium
+      - name: Render frames ${{ matrix.shard.start }} to ${{ matrix.shard.end }}
+        working-directory: tools
+        env:
+          QUERY: ${{ needs.plan.outputs.query }}
+          W: ${{ needs.plan.outputs.width }}
+          H: ${{ needs.plan.outputs.height }}
+          FPS: ${{ inputs.fps }}
+          START: ${{ matrix.shard.start }}
+          END: ${{ matrix.shard.end }}
+          IDX: ${{ matrix.shard.i }}
+        run: node render-video.mjs --query "$QUERY" --width "$W" --height "$H" --fps "$FPS" --start "$START" --end "$END" --out "seg-$(printf %03d "$IDX").mp4"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seg-${{ matrix.shard.i }}
+          path: tools/seg-*.mp4
+          retention-days: 1
+
+  combine:
+    needs: [plan, render]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: store-result
+      cancel-in-progress: false
+    env:
+      NAME: ${{ needs.plan.outputs.name }}
+      FRAMES: ${{ needs.plan.outputs.frames }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seg-*
+          path: segs
+          merge-multiple: true
+      - name: Join the pieces and check the frame count
+        run: |
+          ls segs/seg-*.mp4 | sort | sed "s|^|file '$PWD/|; s|\$|'|" > list.txt
+          mkdir -p result
+          ffmpeg -y -loglevel error -f concat -safe 0 -i list.txt -c copy -movflags +faststart -tag:v avc1 "result/$NAME"
+          n=$(ffprobe -v error -count_packets -select_streams v -show_entries stream=nb_read_packets -of csv=p=0 "result/$NAME")
+          if [ "$n" != "$FRAMES" ]; then echo "::error::expected $FRAMES frames, got $n"; exit 1; fi
+          ls -la result
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video
+          path: result/${{ needs.plan.outputs.name }}
+      - name: Add to the "videos" release
+        run: |
+          gh release view videos >/dev/null 2>&1 || gh release create videos --target "$GITHUB_SHA" --title "Wallpaper videos" \
+            --notes "Seamless loops rendered by the \"Render wallpaper video\" workflow. Import them into Muro or any video wallpaper app."
+          gh release upload videos "result/$NAME" --clobber
+      - name: Store in result/
+        run: |
+          size=$(stat -c %s "result/$NAME")
+          if [ "$size" -gt 95000000 ]; then
+            echo "::warning::$NAME is $((size / 1000000)) MB, over GitHub's file limit, so it is only in the videos release"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "result/$NAME"
+          git commit -m "Add rendered video $NAME"
+          for i in 1 2 3 4; do
+            git push origin "HEAD:$GITHUB_REF_NAME" && exit 0
+            git fetch --depth=20 origin "$GITHUB_REF_NAME" && git rebase "origin/$GITHUB_REF_NAME"
+          done
+          exit 1
+      - name: Summary
+        run: |
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/videos/$NAME"
+          {
+            echo "### $NAME"
+            echo "- Download: [$NAME]($url)"
+            echo "- In the repository: \`result/$NAME\` (if under 95 MB)"
+            echo "- $FRAMES frames, loops seamlessly. Import it into Muro as your own video."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -95,6 +95,12 @@ Point your wallpaper app at `index.html` with the options you like, for example 
   3. In Muro, import that `.mp4` as your own video.
 
   The video is H.264 at your screen's full resolution and 30 fps. It holds exactly one loop and leaves out the duplicate seam frame, so it repeats with no visible jump. Use a 30-second loop (`?loop=30`) for a smaller file. Change the frame rate with `?recfps=60` and the size with `?recw=2560&rech=1600`.
+- **Let GitHub render the video for you:** open the repository's **Actions** tab, choose **Render wallpaper video**, then **Run workflow**. Pick the boat, scene, camera, loop length and your screen size. GitHub renders the frames in software and splits them across many machines, so it takes about 15 to 60 minutes. Larger sizes and 60-second loops take longer. The finished `.mp4`:
+  - is committed to the `result/` folder, if it is under 95 MB, GitHub's file size limit;
+  - is attached to the [**videos** release](../../releases/tag/videos), for any size, with a direct download link;
+  - is also on the run's page, under *Artifacts*.
+
+  Any models in `models/models.js` are used. Locally, `cd tools && npm install && node render-video.mjs --query "boat=yacht&scene=sunset" --width 2560 --height 1600 --out video.mp4` does the same, but needs ffmpeg.
 - **macOS:** [Plash](https://sindresorhus.com/plash) (free) shows the live page itself. Add a website pointing at the file or the hosted URL.
 - **Linux:** [Hidamari](https://github.com/jeffshee/hidamari) or Komorebi (web page mode). On KDE, use an HTML wallpaper plugin.
 - **Other video wallpaper apps** (Wallpaper Engine, Hidamari's video mode, VLC): press `R` as above and use the `.mp4`. In browsers without video encoding (WebCodecs), `R` falls back to a real-time `.webm` recording.
