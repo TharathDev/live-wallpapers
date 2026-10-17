@@ -18,6 +18,8 @@
   #hud kbd { font: 11px ui-monospace, monospace; padding: 0 4px; border-radius: 3px; background: rgba(255,255,255,.12); }
   #rec { position: fixed; right: 16px; top: 16px; font: 600 12px system-ui, sans-serif; color: #fff;
     background: #c62828; border-radius: 6px; padding: 4px 10px; display: none; }
+  #toast { position: fixed; left: 50%; top: 16px; transform: translateX(-50%); max-width: min(560px, 90vw); display: none;
+    font: 13px/1.5 system-ui, sans-serif; color: #eef; background: rgba(8, 12, 18, .8); border-radius: 8px; padding: 8px 14px; }
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #ccd; font: 15px system-ui, sans-serif; text-align: center; padding: 16px; }
 </style>
 </head>
@@ -25,25 +27,30 @@
 <canvas id="c"></canvas>
 <div id="hud"></div>
 <div id="rec">REC</div>
+<div id="toast"></div>
 <div id="err">This wallpaper needs WebGL2. Try a recent Chrome, Edge, Firefox or Safari.</div>
 
-<script id="fs" type="x-shader/x-fragment">#version 300 es
+<script id="fs" type="x-shader/x-fragment">
+// Ocean, sky and fallback boats. Compiled twice: as the full-screen ocean pass, and with
+// ENV_SKY defined to paint the sky into the cube map that lights the 3D boat models.
 precision highp float;
+precision highp int;
 out vec4 fragColor;
 
 #define NW 36
 #define NMARCH 12
-#define NSPRAY 96
 
 uniform vec2  uRes;
-uniform float uTime, uLoop, uV, uH, uFov, uSeed;
+uniform float uTime, uLoop, uV, uH;
 uniform vec4  uW0[NW];   // dir.x, dir.z, frequency (1/unit), weight
 uniform float uPh[NW];   // current phase of each wave (loop-quantised, set from JS)
-uniform vec3  uCamPos, uCamTgt, uCamUp;
+uniform vec3  uCamPos;
+uniform mat4  uInvProj, uCamWorld, uViewProj;
+uniform int   uUseSDF;    // 1 = draw the built-in boat here; 0 = a 3D model is drawn afterwards
 uniform mat3  uBoatR;
 uniform vec3  uBoatP;
 uniform vec2  uBoatSlope; // dy/dx, dy/dz of the boat's waterline plane
-uniform float uSpray, uWake;
+uniform float uWake;
 uniform int   uBoat;      // 0 motor yacht, 1 galleon, 2 fishing boat, 3 sailing yacht
 uniform vec4  uH0;        // bow x, stern distance, half beam, draft
 uniform vec4  uH1;        // deck height aft, sheer rise to the bow, deadrise, keel rise
@@ -53,7 +60,7 @@ uniform vec4  uCock;      // open deck: centre x, half length, side inset, depth
 uniform vec3  uLightP[4];
 uniform vec3  uLightC[4];
 uniform vec3  uSunDir, uSunCol, uZenith, uHorizon, uSunHaze, uCloudCol, uWaterDeep, uWaterScat;
-uniform float uCover, uExposure, uFoam, uLights, uStars, uFlash, uGrain;
+uniform float uCover, uFoam, uLights, uStars, uFlash;
 uniform vec3  uFlashDir;
 
 const float U = 8.0;        // metres per wave unit
@@ -644,56 +651,26 @@ vec3 shadeBoat(vec3 lp, vec3 rd, vec3 wp, float t, float mat) {
   return applyFog(col, rd, t);
 }
 
-// spray thrown off the bow, as soft particles in the boat frame
-vec4 spray(vec3 lo, vec3 ld, float tScene, vec3 rd) {
-  if (uSpray <= .01) return vec4(0.);
-  vec3 oc = vec3(XB - 2., 1.2, 0.) - lo;
-  float tc = dot(oc, ld);
-  if (dot(oc, oc) - tc * tc > 64.) return vec4(0.);
-  float spd = sqrt(uV / 8.);
-  float acc = 0.;
-  for (int i = 0; i < NSPRAY; i++) {
-    float fi = float(i) + uSeed;
-    float s1 = hash11(fi * 1.37), s2 = hash11(fi * 2.71 + 4.), s3 = hash11(fi * 3.17 + 9.);
-    float s4 = hash11(fi * 5.03 + 1.), s5 = hash11(fi * 7.11 + 3.), s6 = hash11(fi * 1.91 + 7.);
-    float cyc = max(1., floor(uLoop / (.55 + .8 * s1)));   // whole number of lifetimes per loop
-    float ph = fract(uTime * cyc / uLoop + s2);
-    float age = ph * uLoop / cyc;
-    float side = (i & 1) == 0 ? 1. : -1.;
-    float x0 = XB - .2 - s3 * 3.4;
-    vec3 p0 = vec3(x0, .1, side * (hullHW(x0) * .9 + .15));
-    float push = smoothstep(-1.5, XB, x0);
-    vec3 v0 = vec3(-(1.2 + 2.6 * s4) * spd, (1.6 + 3.8 * s5) * (.4 + .6 * push) * uSpray * spd, side * (1.4 + 3.2 * s6) * (.5 + .5 * push) * spd);
-    vec3 pos = p0 + v0 * age + vec3(-2.2, -9.81, 0.) * .5 * age * age;
-    if (pos.y < -.2) continue;
-    float rad = .05 + .28 * age;
-    vec3 d = pos - lo;
-    float tp = dot(d, ld);
-    if (tp < 0. || tp > tScene) continue;
-    float d2 = dot(d, d) - tp * tp;
-    float life = 1. - ph;
-    acc += life * exp(-d2 / (rad * rad)) * (.3 + .5 * push) * uSpray;
-  }
-  float a = 1. - exp(-acc * 1.6 * mix(1., .35, abs(ld.y)));
-  float fwd = pow(max(dot(rd, uSunDir), 0.), 6.);
-  vec3 c = uSunCol * (.12 + .25 * max(uSunDir.y, 0.) + 1.6 * fwd) + ambientCol() * 1.1;
-  return vec4(c * .9, a * .85);
-}
-
-vec3 aces(vec3 x) { return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
-
+#ifdef ENV_SKY
+in vec3 vDir;
 void main() {
-  vec2 uv = (gl_FragCoord.xy - .5 * uRes) / uRes.y;
+  vec3 rd = normalize(vDir);
+  vec3 col = sky(vec3(rd.x, max(rd.y, 0.), rd.z), 4, false);
+  vec3 sea = uWaterDeep * ambientCol() * 3. + uWaterScat * ambientCol() * .15 + fogCol(rd) * .25;
+  col = mix(col, sea, smoothstep(0., -.12, rd.y));
+  fragColor = vec4(col, 1.);
+}
+#else
+void main() {
+  vec2 ndc = gl_FragCoord.xy / uRes * 2. - 1.;
+  vec4 v = uInvProj * vec4(ndc, 1., 1.);
+  vec3 rd = normalize((uCamWorld * vec4(v.xyz / v.w, 0.)).xyz);
   vec3 ro = uCamPos;
-  vec3 fw = normalize(uCamTgt - ro);
-  vec3 rt = normalize(cross(fw, uCamUp));
-  vec3 up = cross(rt, fw);
-  vec3 rd = normalize(fw + (uv.x * rt + uv.y * up) * 2. * tan(uFov * .5));
 
   mat3 Rt = transpose(uBoatR);
   vec3 lo = Rt * (ro - uBoatP), ld = Rt * rd;
   float mat = 0.;
-  float tb = traceBoat(lo, ld, mat);
+  float tb = uUseSDF == 1 ? traceBoat(lo, ld, mat) : -1.;
   float tw = traceWater(ro, rd);
 
   bool useBoat = tb > 0. && (tw < 0. || tb < tw);
@@ -710,41 +687,19 @@ void main() {
     tScene = tw;
     col = shadeWater(ro + rd * tw, rd, tw);
   } else {
-    tScene = 1e5;
+    tScene = -1.;
     col = sky(rd, 5, true);
   }
-
-  vec4 sp = spray(lo, ld, tScene, rd);
-  col = mix(col, sp.rgb, sp.a);
-
-  // glow halos around the nav lights
-  if (uLights > 0.) {
-    for (int i = 0; i < 4; i++) {
-      if (dot(uLightC[i], uLightC[i]) < 1e-4) continue;
-      vec3 d = uLightP[i] - lo;
-      float tp = dot(d, ld);
-      if (tp < 0. || tp > tScene + .4) continue;
-      vec3 toCam = -normalize(d);
-      // port light shows to port, starboard to starboard, stern light only aft
-      float vis = i == 1 ? step(toCam.z, .2) : i == 2 ? step(-.2, toCam.z) : i == 3 ? step(toCam.x, 0.) : 1.;
-      float d2 = max(dot(d, d) - tp * tp, 0.);
-      col += uLightC[i] * vis * uLights * uLights * (exp(-d2 * 2500.) * 5. + .0008 / (d2 + .0004));
-    }
-  }
-
-  // tone mapping and grade
-  col *= uExposure;
-  col = aces(col);
-  col = pow(col, vec3(1. / 2.2));
-  col = mix(col, col * col * (3. - 2. * col), .3);
-  col += vec3(-.006, .004, .014) * (1. - col);
-  vec2 q = gl_FragCoord.xy / uRes;
-  col *= .55 + .45 * pow(16. * q.x * q.y * (1. - q.x) * (1. - q.y), .22);
-  col += (hash12(gl_FragCoord.xy + fract(uTime * 7.31) * 517.) - .5) * uGrain / 255.;
+  // depth, so the 3D boat, spray and lights drawn next are hidden by the water correctly
+  if (tScene < 0.) gl_FragDepth = 1.;
+  else { vec4 c = uViewProj * vec4(ro + rd * tScene, 1.); gl_FragDepth = clamp(c.z / c.w * .5 + .5, 0., 1.); }
   fragColor = vec4(col, 1.);
 }
+#endif
 </script>
 
+<script src="vendor/three.bundle.js"></script>
+<script src="models/models.js"></script>
 <script>
 (() => {
   'use strict';
@@ -817,7 +772,7 @@ void main() {
   const NAV = [[1, .92, .8], [1, .08, .05], [.05, 1, .3], [1, .9, .75]];
   const BOATS = {
     yacht: {
-      label: 'Motor yacht', type: 0, V: 12, wake: 1.3, spray: 1.2, trim: 0.04, heel: 0, buzz: 1,
+      label: 'Motor yacht', type: 0, model: { length: 19, draft: .38 }, V: 12, wake: 1.3, spray: 1.2, trim: 0.04, heel: 0, buzz: 1,
       h0: [10, 9, 2.6, .9], h1: [1.6, .9, .3, .03], h2: [1, 1.45, 0, 0], cock: [-7.4, 1.4, .3, .75],
       bound: [0.3, 2.6, 11.6], scene: 'tropical', view: 'drone',
       lights: [[-3.4, 5.55, 0], [3.4, 2.5, -2.1], [3.4, 2.5, 2.1], [-9.02, 1.3, 0]], lightCol: NAV,
@@ -829,7 +784,7 @@ void main() {
       },
     },
     galleon: {
-      label: 'Galleon', type: 1, V: 3.5, wake: .4, spray: .2, trim: 0, heel: .03, buzz: 0,
+      label: 'Galleon', type: 1, model: { length: 34, draft: .45 }, V: 3.5, wake: .4, spray: .2, trim: 0, heel: .03, buzz: 0,
       h0: [13, 12, 4.2, 2.5], h1: [3.0, 0, 0, .05], h2: [3, 1.3, 3.5, 1.8], cock: [0, 0, 0, 0],
       bound: [4, 13.5, 25.5], scene: 'golden', view: 'side',
       lights: [[-13.6, 7.9, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]], lightCol: [[1, .7, .35], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
@@ -841,7 +796,7 @@ void main() {
       },
     },
     fishing: {
-      label: 'Fishing boat', type: 2, V: 7, wake: 1.2, spray: .9, trim: .03, heel: 0, buzz: 1.4,
+      label: 'Fishing boat', type: 2, model: { length: 13, draft: .45 }, V: 7, wake: 1.2, spray: .9, trim: .03, heel: 0, buzz: 1.4,
       h0: [7, 6, 2.4, 1.1], h1: [1.7, .9, .25, .045], h2: [.5, 1.6, 0, 0], cock: [-2.45, 3.3, .18, 1.0],
       bound: [0.5, 3.4, 8.6], scene: 'overcast', view: 'deck',
       lights: [[2, 7.0, 0], [3.6, 3.6, -1.62], [3.6, 3.6, 1.62], [-6.02, 1.9, 0]], lightCol: NAV,
@@ -853,7 +808,7 @@ void main() {
       },
     },
     sailboat: {
-      label: 'Sailing yacht', type: 3, V: 4.5, wake: .35, spray: .2, trim: .01, heel: .17, buzz: 0,
+      label: 'Sailing yacht', type: 3, model: { length: 12.5, draft: .58 }, V: 4.5, wake: .35, spray: .2, trim: .01, heel: .17, buzz: 0,
       h0: [6.5, 6, 2.1, .7], h1: [.95, .35, 0, .03], h2: [.5, 1.5, 0, 0], cock: [-3.55, 1.85, .45, .55],
       bound: [0.4, 9.4, 13], scene: 'clear', view: 'chase',
       lights: [[1.4, 19.2, 0], [6.2, 1.45, -.3], [6.2, 1.45, .3], [-6.02, .95, 0]], lightCol: NAV,
@@ -870,7 +825,8 @@ void main() {
   let sceneName = SCENES[P.get('scene')] ? P.get('scene') : BOATS[boatName].scene;
   let viewName = VIEWS.includes(P.get('view')) ? P.get('view') : BOATS[boatName].view;
 
-  const G = 9.81, UNIT = 8, DRAG = 0.28, NW = 36, NMARCH = 12;
+  const G = 9.81, UNIT = 8, DRAG = 0.28, NW = 36, NMARCH = 12, NSPRAY = 96;
+  const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
   // ------------------------------------------------------------ waves
   // Each wave's phase speed (dispersion + the boat's motion over it) is rounded to a whole
@@ -913,8 +869,8 @@ void main() {
 
   // ------------------------------------------------------------ boat motion (periodic by construction)
   let HULL_PTS = [], hullSpan = 6, hullBeam = 2;
-  function setHullPoints(boat) {
-    const [lb, ls, hb] = boat.h0, xb = boat.xb;
+  function setHullPoints(hull) {
+    const [, ls, hb] = hull.h0, xb = hull.xb;
     HULL_PTS = [];
     for (let i = 0; i <= 5; i++) {
       const x = -ls * .85 + (xb * .9 + ls * .85) * i / 5;
@@ -947,7 +903,7 @@ void main() {
     const yaw = 0.025 * Math.sin(cyc(1 / 15) * t + 1.0) + 0.012 * Math.sin(cyc(0.17) * t);
     const heave = a.heave * 0.9 - 0.12 + bz * 0.008 * Math.sin(cyc(7.0) * t);
     const bowDrop = (b.bow - a.bow) / 0.12;   // positive when the bow falls into a trough
-    const sprayAmt = boat.spray * Math.min(1.6, Math.max(0.45, 0.85 + bowDrop * 0.35));
+    const sprayAmt = boat.spray * num('spray', 1) * Math.min(1.6, Math.max(0.45, 0.85 + bowDrop * 0.35));
     return { pitch, roll, yaw, heave, spray: sprayAmt };
   }
   function rotMat(yaw, pitch, roll) {
@@ -962,6 +918,7 @@ void main() {
     return m;
   }
   const mulMV = (m, v) => [m[0] * v[0] + m[3] * v[1] + m[6] * v[2], m[1] * v[0] + m[4] * v[1] + m[7] * v[2], m[2] * v[0] + m[5] * v[1] + m[8] * v[2]];
+  const mulMTV = (m, v) => [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]];
 
   // storm lightning: a few strikes at fixed points in the loop
   const STRIKES = [[0.17, [0.9, 0.25, -0.4]], [0.43, [0.8, 0.2, 0.5]], [0.71, [1.0, 0.3, -0.05]]];
@@ -978,76 +935,339 @@ void main() {
     return { f: Math.max(0, f), dir: dir.map(v => v / l) };
   }
 
-  // ------------------------------------------------------------ GL setup
+  // ------------------------------------------------------------ renderer
+  // Pass 1: the ray-marched ocean (and the built-in boat when there is no 3D model) writes
+  // HDR colour and depth. Pass 2: the 3D boat model, spray and nav lights, depth-tested
+  // against the sea. Pass 3: tone mapping and grading to the screen.
   const canvas = document.getElementById('c');
-  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
-  if (!gl) { document.getElementById('err').style.display = 'grid'; return; }
-  const vsSrc = `#version 300 es
-  void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2. - 1., 0., 1.); }`;
-  function compile(type, src) {
-    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
-    return s;
+  const fail = () => { document.getElementById('err').style.display = 'grid'; };
+  if (!window.THREE) { fail(); return; }
+  let renderer;
+  try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' }); }
+  catch (e) { fail(); return; }
+  renderer.autoClear = false;
+  renderer.setPixelRatio(1);
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const SHADER = document.getElementById('fs').textContent;
+  const FULLSCREEN_VS = 'in vec3 position;\nvoid main() { gl_Position = vec4(position.xy, 0., 1.); }';
+  const uni = {};
+  const def = (name, value) => (uni[name] = { value });
+  def('uRes', new THREE.Vector2(1, 1)); def('uTime', 0); def('uLoop', LOOP); def('uV', 8); def('uH', 1);
+  def('uW0', W0); def('uPh', PH);
+  def('uCamPos', new THREE.Vector3()); def('uInvProj', new THREE.Matrix4()); def('uCamWorld', new THREE.Matrix4()); def('uViewProj', new THREE.Matrix4());
+  def('uUseSDF', 1); def('uBoat', 0); def('uWake', 1);
+  def('uBoatR', new THREE.Matrix3()); def('uBoatP', new THREE.Vector3()); def('uBoatSlope', new THREE.Vector2());
+  for (const n of ['uH0', 'uH1', 'uH2', 'uH3', 'uCock']) def(n, new THREE.Vector4());
+  def('uLightP', new Float32Array(12)); def('uLightC', new Float32Array(12));
+  for (const n of ['uSunDir', 'uSunCol', 'uZenith', 'uHorizon', 'uSunHaze', 'uCloudCol', 'uWaterDeep', 'uWaterScat', 'uFlashDir']) def(n, new THREE.Vector3());
+  for (const n of ['uCover', 'uFoam', 'uLights', 'uStars', 'uFlash']) def(n, 0);
+
+  const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const quad = new THREE.PlaneGeometry(2, 2);
+  const fullscreen = mat => { const sc = new THREE.Scene(), m = new THREE.Mesh(quad, mat); m.frustumCulled = false; sc.add(m); return sc; };
+  const oceanScene = fullscreen(new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, vertexShader: FULLSCREEN_VS, fragmentShader: SHADER, uniforms: uni,
+    depthTest: true, depthFunc: THREE.AlwaysDepth, depthWrite: true,
+  }));
+
+  // the sky, painted into a cube map, lights and reflects in the 3D models
+  const envScene = new THREE.Scene();
+  envScene.add(new THREE.Mesh(new THREE.SphereGeometry(100, 48, 24), new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, defines: { ENV_SKY: '' }, uniforms: uni, side: THREE.BackSide, depthWrite: false,
+    vertexShader: 'in vec3 position;\nuniform mat4 modelViewMatrix, projectionMatrix;\nout vec3 vDir;\nvoid main() { vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }',
+    fragmentShader: SHADER,
+  })));
+  const cubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType });
+  const cubeCam = new THREE.CubeCamera(1, 1000, cubeRT);
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  let envRT = null;
+
+  const hdr = new THREE.WebGLRenderTarget(16, 16, { type: THREE.HalfFloatType, samples: 4, depthBuffer: true });
+  const post = {
+    tHDR: { value: hdr.texture }, uExposure: { value: 1 }, uGrain: { value: num('grain', 2) }, uTime: uni.uTime, uRes: uni.uRes,
+  };
+  const postScene = fullscreen(new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, uniforms: post, vertexShader: FULLSCREEN_VS, depthTest: false, depthWrite: false,
+    fragmentShader: `precision highp float;
+uniform sampler2D tHDR;
+uniform float uExposure, uGrain, uTime;
+uniform vec2 uRes;
+out vec4 fragColor;
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+vec3 aces(vec3 x) { return clamp((x * (2.51 * x + .03)) / (x * (2.43 * x + .59) + .14), 0., 1.); }
+void main() {
+  vec2 q = gl_FragCoord.xy / uRes;
+  vec3 col = aces(texture(tHDR, q).rgb * uExposure);
+  col = pow(col, vec3(1. / 2.2));
+  col = mix(col, col * col * (3. - 2. * col), .3);
+  col += vec3(-.006, .004, .014) * (1. - col);
+  col *= .55 + .45 * pow(16. * q.x * q.y * (1. - q.x) * (1. - q.y), .22);
+  col += (hash12(gl_FragCoord.xy + fract(uTime * 7.31) * 517.) - .5) * uGrain / 255.;
+  fragColor = vec4(col, 1.);
+}`,
+  }));
+
+  const boatScene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 20000);
+  const sun = new THREE.DirectionalLight(0xffffff, 1);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.03;
+  boatScene.add(sun, sun.target);
+  const boatGroup = new THREE.Group();
+  boatGroup.matrixAutoUpdate = false;
+  boatScene.add(boatGroup);
+
+  // spray thrown off the bow: soft particles riding with the boat
+  const sprayGeo = new THREE.BufferGeometry();
+  sprayGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NSPRAY * 3), 3));
+  sprayGeo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(NSPRAY), 1));
+  sprayGeo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(NSPRAY), 1));
+  const sprayUni = { uScale: { value: 1 }, uSunDir: uni.uSunDir, uSunCol: uni.uSunCol, uSprayCol: { value: new THREE.Vector3() } };
+  const spray = new THREE.Points(sprayGeo, new THREE.ShaderMaterial({
+    uniforms: sprayUni, transparent: true, depthWrite: false,
+    vertexShader: `attribute float aSize, aAlpha;
+uniform float uScale;
+uniform vec3 uSunDir;
+varying float vA, vFwd;
+void main() {
+  vec4 wp = modelMatrix * vec4(position, 1.);
+  vec4 mv = viewMatrix * wp;
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = min(aSize * uScale / max(-mv.z, .1), 256.);
+  vec3 vd = normalize(wp.xyz - cameraPosition);
+  vFwd = pow(max(dot(vd, uSunDir), 0.), 6.);
+  vA = aAlpha * mix(1., .35, abs(vd.y));
+}`,
+    fragmentShader: `uniform vec3 uSunCol, uSprayCol;
+varying float vA, vFwd;
+void main() {
+  vec2 c = gl_PointCoord * 2. - 1.;
+  float r2 = dot(c, c);
+  if (r2 > 1. || vA < .002) discard;
+  gl_FragColor = vec4(uSprayCol + uSunCol * 1.45 * vFwd, exp(-r2 * 3.) * vA);
+}`,
+  }));
+  spray.frustumCulled = false;
+  boatGroup.add(spray);
+
+  // nav light glows
+  const lightGeo = new THREE.BufferGeometry();
+  lightGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(12), 3));
+  lightGeo.setAttribute('aColor', new THREE.BufferAttribute(new Float32Array(12), 3));
+  lightGeo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(4), 1));
+  const lightUni = { uScale: sprayUni.uScale };
+  const navLights = new THREE.Points(lightGeo, new THREE.ShaderMaterial({
+    uniforms: lightUni, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `attribute vec3 aColor;
+attribute float aAlpha;
+uniform float uScale;
+varying vec3 vC;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = clamp(2.5 * uScale / max(-mv.z, .1), 6., 160.);
+  vC = aColor * aAlpha;
+}`,
+    fragmentShader: `varying vec3 vC;
+void main() {
+  vec2 c = gl_PointCoord * 2. - 1.;
+  float r2 = dot(c, c);
+  if (r2 > 1. || dot(vC, vC) < 1e-6) discard;
+  gl_FragColor = vec4(vC * (exp(-r2 * 120.) * 6. + .012 / (r2 + .006) * (1. - r2)), 1.);
+}`,
+  }));
+  navLights.frustumCulled = false;
+  boatGroup.add(navLights);
+
+  // ------------------------------------------------------------ 3D boat models
+  // A model comes from models/models.js (packed by tools/pack-models.mjs, works from disk),
+  // or models/<boat>.glb when served over http, or a .glb dropped onto the page.
+  // Without one, the built-in ray-marched boat is drawn instead.
+  const loader = new THREE.GLTFLoader();
+  loader.setMeshoptDecoder(THREE.MeshoptDecoder);
+  const models = {};     // boat name -> prepared model, null (none), or a pending Promise
+  let currentModel = null;
+
+  function b64ToBuffer(b64) {
+    const bin = atob(b64), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
   }
-  const prog = gl.createProgram();
-  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
-  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-  gl.useProgram(prog);
-  gl.bindVertexArray(gl.createVertexArray());
-  const loc = {};
-  for (let i = 0, n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS); i < n; i++) {
-    const name = gl.getActiveUniform(prog, i).name.replace(/\[0\]$/, '');
-    loc[name] = gl.getUniformLocation(prog, name);
+  async function modelSource(name) {
+    if (window.OCEAN_MODELS && window.OCEAN_MODELS[name]) return b64ToBuffer(window.OCEAN_MODELS[name]);
+    if (/^https?:$/.test(location.protocol)) {
+      try { const r = await fetch(`models/${name}.glb`); if (r.ok) return await r.arrayBuffer(); } catch (e) { /* no model */ }
+    }
+    return null;
   }
-  const v3 = (n, v) => gl.uniform3fv(loc[n], v);
+  const parseGLB = buf => new Promise((res, rej) => loader.parse(buf, 'models/', g => res(g.scene), rej));
+
+  // Collect model vertices in the model's placed frame (subsampled for big meshes).
+  function vertices(root) {
+    root.updateMatrixWorld(true);
+    const pts = [], v = new THREE.Vector3();
+    root.traverse(o => {
+      if (!o.isMesh || !o.geometry.attributes.position) return;
+      const pos = o.geometry.attributes.position, step = Math.max(1, Math.floor(pos.count / 60000));
+      for (let i = 0; i < pos.count; i += step) { v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld); pts.push(v.x, v.y, v.z); }
+    });
+    return pts;
+  }
+
+  // Turn any boat model into the scene's frame: bow along +x, scaled to the boat's length,
+  // sunk to its waterline. Also measures the hull so the wake, foam and motion fit it.
+  function prepareModel(root, boat) {
+    const cfg = boat.model, outer = new THREE.Group(), pivot = new THREE.Group();
+    root.removeFromParent();
+    outer.add(pivot); pivot.add(root);
+    let box = new THREE.Box3().setFromObject(outer, true), size = box.getSize(new THREE.Vector3());
+    if (size.z > size.x) pivot.rotation.y = Math.PI / 2;         // lay the long axis along x
+    box = new THREE.Box3().setFromObject(outer, true); size = box.getSize(new THREE.Vector3());
+    pivot.scale.setScalar(num('length', cfg.length) / size.x);
+    // the bow is the narrow end of the hull
+    let pts = vertices(outer);
+    box = new THREE.Box3().setFromObject(outer, true); size = box.getSize(new THREE.Vector3());
+    const L = size.x, zc = (box.min.z + box.max.z) / 2, yCut = box.min.y + Math.min(size.y * .3, 4);
+    let wFront = 0, wBack = 0;
+    for (let i = 0; i < pts.length; i += 3) {
+      if (pts[i + 1] > yCut) continue;
+      const w = Math.abs(pts[i + 2] - zc);
+      if (pts[i] > box.max.x - .15 * L) wFront = Math.max(wFront, w);
+      if (pts[i] < box.min.x + .15 * L) wBack = Math.max(wBack, w);
+    }
+    if ((wFront > wBack) !== (P.get('flip') === '1')) pivot.rotation.y += Math.PI;
+    // sink it to a set fraction of the hull's depth, keel to gunwale (amidships, outboard)
+    box = new THREE.Box3().setFromObject(outer, true);
+    pts = vertices(outer);
+    const zc2 = (box.min.z + box.max.z) / 2, xc2 = (box.min.x + box.max.x) / 2;
+    // (only the lower part counts, so yards and booms can't pass for the gunwale)
+    const yMax = box.min.y + .3 * L, mid = i => Math.abs(pts[i] - xc2) < .15 * L && pts[i + 1] < yMax;
+    let halfW = 0, gunwale = -1e9;
+    for (let i = 0; i < pts.length; i += 3) if (mid(i)) halfW = Math.max(halfW, Math.abs(pts[i + 2] - zc2));
+    for (let i = 0; i < pts.length; i += 3) if (mid(i) && Math.abs(pts[i + 2] - zc2) > .85 * halfW) gunwale = Math.max(gunwale, pts[i + 1]);
+    const depth = gunwale > box.min.y ? gunwale - box.min.y : box.getSize(new THREE.Vector3()).y * .3;
+    const waterline = waterlineOverride[boat.label] ?? num('waterline', cfg.draft * depth);
+    pivot.position.set(-(box.min.x + box.max.x) / 2, -box.min.y - waterline, -(box.min.z + box.max.z) / 2);
+
+    // measure the hull at the waterline
+    pts = vertices(outer);
+    box = new THREE.Box3().setFromObject(outer, true); size = box.getSize(new THREE.Vector3());
+    let xb = -1e9, xs = 1e9, hb = 0, deck = 0, topX = 0, topY = -1e9;
+    for (let i = 0; i < pts.length; i += 3) {
+      const x = pts[i], y = pts[i + 1], z = Math.abs(pts[i + 2]);
+      if (y < .1) { xb = Math.max(xb, x); xs = Math.min(xs, x); }
+      if (Math.abs(y) < .6) hb = Math.max(hb, z);
+      if (Math.abs(x) < .15 * size.x && y < size.y * .4) deck = Math.max(deck, y);
+      if (y > topY) { topY = y; topX = x; }
+    }
+    if (xb < -1e8) { xb = box.max.x * .8; xs = box.min.x * .9; }
+    hb = hb || size.z / 2; deck = deck || 1.5;
+    const ls = -xs, lb = xb + .3;
+    const lights = boat.type === 1
+      ? [[box.min.x + .6, deck + 1.6, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+      : [[topX, topY + .12, 0], [xb * .5, deck + .45, -hb * .95], [xb * .5, deck + .45, hb * .95], [box.min.x - .02, deck * .8, 0]];
+    const radius = new THREE.Vector3(Math.max(-box.min.x, box.max.x), Math.max(-box.min.y, box.max.y), Math.max(-box.min.z, box.max.z)).length();
+
+    outer.traverse(o => {
+      if (!o.isMesh) return;
+      o.castShadow = o.receiveShadow = true;
+      for (const m of [].concat(o.material)) if ('envMapIntensity' in m) m.envMapIntensity = 1;
+    });
+    return {
+      object: outer,
+      root, waterline,
+      hull: { h0: [lb, ls, hb, waterline], h1: [deck, 0, .25, .04], h2: [0, boat.h2[1], 0, 0], cock: [0, 0, 0, 0],
+              xb, bound: [0, (box.min.y + box.max.y) / 2, radius], lights, lightCol: boat.lightCol, radius },
+    };
+  }
+  const waterlineOverride = {};
+  async function loadModel(name) {
+    if (P.get('model') === '0') return null;
+    const buf = await modelSource(name);
+    if (!buf) return null;
+    try { return prepareModel(await parseGLB(buf), BOATS[name]); }
+    catch (e) { console.warn(`could not load the ${name} model:`, e); return null; }
+  }
+  function ensureModel(name) {
+    if (!(name in models)) {
+      models[name] = loadModel(name).then(m => { models[name] = m; if (name === boatName) showBoat(); return m; });
+    }
+    return models[name];
+  }
+  function builtInHull(b) {
+    return { h0: b.h0, h1: b.h1, h2: b.h2, cock: b.cock, xb: b.h2[0] + Math.sqrt(b.h0[3] / b.h1[3]), bound: b.bound,
+             lights: b.lights, lightCol: b.lightCol, radius: b.bound[2] };
+  }
+  let hull = null;
+  function showBoat() {
+    const b = BOATS[boatName], m = models[boatName];
+    if (currentModel) boatGroup.remove(currentModel.object);
+    currentModel = m && m.object ? m : null;
+    if (currentModel) boatGroup.add(currentModel.object);
+    uni.uUseSDF.value = currentModel ? 0 : 1;
+    hull = currentModel ? currentModel.hull : builtInHull(b);
+    uni.uH0.value.fromArray(hull.h0); uni.uH1.value.fromArray(hull.h1); uni.uH2.value.fromArray(hull.h2);
+    uni.uH3.value.fromArray([...hull.bound, hull.xb]); uni.uCock.value.fromArray(hull.cock);
+    uni.uLightP.value.set(hull.lights.flat()); uni.uLightC.value.set(hull.lightCol.flat());
+    lightGeo.attributes.position.array.set(hull.lights.flat()); lightGeo.attributes.position.needsUpdate = true;
+    lightGeo.attributes.aColor.array.set(hull.lightCol.flat()); lightGeo.attributes.aColor.needsUpdate = true;
+    const r = hull.radius * 1.2, sc = sun.shadow.camera;
+    sc.left = sc.bottom = -r; sc.right = sc.top = r; sc.near = .5; sc.far = r * 5; sc.updateProjectionMatrix();
+    setHullPoints(hull);
+    drawHud();
+  }
+
+  // ------------------------------------------------------------ scene / boat switching
   const norm = v => { const l = Math.hypot(...v); return v.map(x => x / l); };
-
-  gl.uniform4fv(loc.uW0, W0);
-  gl.uniform1f(loc.uLoop, LOOP);
-  gl.uniform1f(loc.uSeed, 0);
-  gl.uniform1f(loc.uGrain, num('grain', 2));
-
   function applyScene() {
     const s = SCENES[sceneName];
-    v3('uSunDir', norm(s.sun)); v3('uSunCol', s.sunCol); v3('uZenith', s.zenith); v3('uHorizon', s.horizon);
-    v3('uSunHaze', s.haze); v3('uCloudCol', s.cloud); v3('uWaterDeep', s.deep); v3('uWaterScat', s.scat);
-    gl.uniform1f(loc.uCover, s.cover); gl.uniform1f(loc.uH, s.H); gl.uniform1f(loc.uExposure, s.exposure * num('exposure', 1));
-    gl.uniform1f(loc.uFoam, s.foam); gl.uniform1f(loc.uLights, s.lights); gl.uniform1f(loc.uStars, s.stars);
-    if (!s.storm) gl.uniform1f(loc.uFlash, 0);
+    uni.uSunDir.value.fromArray(norm(s.sun)); uni.uSunCol.value.fromArray(s.sunCol);
+    uni.uZenith.value.fromArray(s.zenith); uni.uHorizon.value.fromArray(s.horizon); uni.uSunHaze.value.fromArray(s.haze);
+    uni.uCloudCol.value.fromArray(s.cloud); uni.uWaterDeep.value.fromArray(s.deep); uni.uWaterScat.value.fromArray(s.scat);
+    uni.uCover.value = s.cover; uni.uH.value = s.H; uni.uFoam.value = s.foam; uni.uLights.value = s.lights; uni.uStars.value = s.stars;
+    uni.uFlash.value = 0;
+    post.uExposure.value = s.exposure * num('exposure', 1);
+    // sunlight on the models, matched to how the water and sky are lit
+    const sc = Math.hypot(...s.sunCol);
+    sun.color.setRGB(s.sunCol[0] / sc, s.sunCol[1] / sc, s.sunCol[2] / sc);
+    sun.intensity = sc * .9 * Math.PI;
+    const amb = s.horizon.map((h, i) => (h * .45 + s.zenith[i] * .55) * 1.1);
+    sprayUni.uSprayCol.value.fromArray(s.sunCol.map((c, i) => (c * (.12 + .25 * Math.max(norm(s.sun)[1], 0)) + amb[i] * 1.1) * .9));
+    cubeCam.update(renderer, envScene);
+    if (envRT) envRT.dispose();
+    envRT = pmrem.fromCubemap(cubeRT.texture);
+    boatScene.environment = envRT.texture;
   }
   function applyBoat() {
     const b = BOATS[boatName];
-    b.xb = b.h2[0] + Math.sqrt(b.h0[3] / b.h1[3]);   // where the keel line meets the water
     setSpeed(num('speed', b.V));
-    gl.uniform1f(loc.uV, V);
-    gl.uniform1i(loc.uBoat, b.type);
-    gl.uniform4fv(loc.uH0, b.h0); gl.uniform4fv(loc.uH1, b.h1); gl.uniform4fv(loc.uH2, b.h2);
-    gl.uniform4fv(loc.uH3, [...b.bound, b.xb]); gl.uniform4fv(loc.uCock, b.cock);
-    gl.uniform3fv(loc.uLightP, b.lights.flat()); gl.uniform3fv(loc.uLightC, b.lightCol.flat());
-    gl.uniform1f(loc.uWake, b.wake);
-    setHullPoints(b);
+    uni.uV.value = V; uni.uBoat.value = b.type; uni.uWake.value = b.wake;
+    ensureModel(boatName);
+    showBoat();
   }
-  applyScene();
-  applyBoat();
 
   // ------------------------------------------------------------ sizing (adaptive resolution)
   let scale = fixedScale ?? 0.75;
   function resize() {
     const w = Math.max(16, Math.round(innerWidth * scale)), h = Math.max(16, Math.round(innerHeight * scale));
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
-    gl.uniform2f(loc.uRes, canvas.width, canvas.height);
+    renderer.setSize(w, h, false);
+    hdr.setSize(w, h);
+    uni.uRes.value.set(w, h);
   }
   addEventListener('resize', resize);
-  resize();
 
-  // ------------------------------------------------------------ frame
+  // ------------------------------------------------------------ cameras
   const vecParam = k => { const v = (P.get(k) || '').split(',').map(Number); return v.length === 3 && v.every(isFinite) ? v : null; };
   const CAM_OVERRIDE = vecParam('cam'), TGT_OVERRIDE = vecParam('tgt');
-  function camera(t, boat, st, R) {
+  function cameraFor(t, boat, st, R) {
     const c = boat.cams[viewName];
-    const fov = num('fov', c.fov) * Math.PI / 180;
+    const fov = num('fov', c.fov);
     if (viewName === 'deck' && !c.world) {
       const P0 = [0, st.heave, 0];
       const add = (a, b) => a.map((v, i) => v + b[i]);
@@ -1061,24 +1281,90 @@ void main() {
     return { pos, tgt: [c.tgt[0], c.tgt[1] + st.heave * 0.4, c.tgt[2]], up: c.up || [0, 1, 0], fov };
   }
 
+  // ------------------------------------------------------------ per-frame particles
+  const sprand = rng(99);
+  const SPR = Array.from({ length: NSPRAY }, () => [sprand(), sprand(), sprand(), sprand(), sprand(), sprand()]);
+  function hullHWjs(x) {
+    const [lb, ls, hb] = hull.h0, pw = hull.h2[1];
+    return x > 0 ? hb * (1 - Math.pow(Math.min(x / lb, 1), pw)) : hb * (1 - .06 * Math.pow(Math.min(-x / ls, 1), 2));
+  }
+  function updateSpray(t, amount) {
+    const pos = sprayGeo.attributes.position.array, size = sprayGeo.attributes.aSize.array, alpha = sprayGeo.attributes.aAlpha.array;
+    const xb = hull.xb, spd = Math.sqrt(V / 8);
+    for (let i = 0; i < NSPRAY; i++) {
+      const [s1, s2, s3, s4, s5, s6] = SPR[i];
+      const cy = Math.max(1, Math.floor(LOOP / (.55 + .8 * s1)));   // whole number of lifetimes per loop
+      const ph = (t * cy / LOOP + s2) % 1, age = ph * LOOP / cy;
+      const side = i & 1 ? -1 : 1;
+      const x0 = xb - .2 - s3 * 3.4, push = smoothstep(-1.5, xb, x0);
+      const vx = -(1.2 + 2.6 * s4) * spd, vy = (1.6 + 3.8 * s5) * (.4 + .6 * push) * amount * spd, vz = side * (1.4 + 3.2 * s6) * (.5 + .5 * push) * spd;
+      const y = .1 + vy * age - 4.905 * age * age;
+      pos[i * 3] = x0 + vx * age - 1.1 * age * age;
+      pos[i * 3 + 1] = y;
+      pos[i * 3 + 2] = side * (hullHWjs(x0) * .9 + .15) + vz * age;
+      size[i] = (.05 + .28 * age) * 3.4;
+      alpha[i] = y < -.2 ? 0 : Math.min(.9, (1 - ph) * (.3 + .5 * push) * amount * 1.1);
+    }
+    for (const k of ['position', 'aSize', 'aAlpha']) sprayGeo.attributes[k].needsUpdate = true;
+  }
+  function updateLights(camLocal) {
+    const a = lightGeo.attributes.aAlpha.array, lv = uni.uLights.value;
+    hull.lights.forEach((p, i) => {
+      const d = [camLocal[0] - p[0], camLocal[1] - p[1], camLocal[2] - p[2]], l = Math.hypot(...d) || 1;
+      const toCam = d.map(v => v / l);
+      // port light shows to port, starboard to starboard, stern light only aft
+      const vis = i === 1 ? toCam[2] < .2 : i === 2 ? toCam[2] > -.2 : i === 3 ? toCam[0] < 0 : true;
+      a[i] = vis ? lv * lv : 0;
+    });
+    lightGeo.attributes.aAlpha.needsUpdate = true;
+  }
+
+  // ------------------------------------------------------------ frame
+  const tmpM = new THREE.Matrix4();
   function render(t) {
     const s = SCENES[sceneName], boat = BOATS[boatName];
     phasesAt(t, PH);
-    gl.uniform1fv(loc.uPh, PH);
-    gl.uniform1f(loc.uTime, t);
-    const b = boatState(t, s.H, boat);
-    const R = rotMat(b.yaw, b.pitch, b.roll);
-    gl.uniformMatrix3fv(loc.uBoatR, false, R);
-    gl.uniform2fv(loc.uBoatSlope, R.slope);
-    gl.uniform3f(loc.uBoatP, 0, b.heave, 0);
-    gl.uniform1f(loc.uSpray, b.spray * num('spray', 1));
-    const cam = camera(t, boat, b, R);
-    gl.uniform3fv(loc.uCamPos, CAM_OVERRIDE ?? cam.pos);
-    gl.uniform3fv(loc.uCamTgt, TGT_OVERRIDE ?? cam.tgt);
-    gl.uniform3fv(loc.uCamUp, cam.up);
-    gl.uniform1f(loc.uFov, cam.fov);
-    if (s.storm) { const f = flashAt(t); gl.uniform1f(loc.uFlash, f.f); v3('uFlashDir', f.dir); }
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    uni.uTime.value = t;
+    const st = boatState(t, s.H, boat);
+    const R = rotMat(st.yaw, st.pitch, st.roll);
+    uni.uBoatR.value.fromArray(R);
+    uni.uBoatSlope.value.fromArray(R.slope);
+    uni.uBoatP.value.set(0, st.heave, 0);
+    boatGroup.matrix.set(R[0], R[3], R[6], 0, R[1], R[4], R[7], st.heave, R[2], R[5], R[8], 0, 0, 0, 0, 1);
+    boatGroup.matrixWorldNeedsUpdate = true;
+
+    const cam = cameraFor(t, boat, st, R);
+    camera.position.fromArray(CAM_OVERRIDE ?? cam.pos);
+    camera.up.fromArray(cam.up);
+    camera.lookAt(...(TGT_OVERRIDE ?? cam.tgt));
+    camera.fov = cam.fov;
+    camera.aspect = uni.uRes.value.x / uni.uRes.value.y;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    uni.uCamPos.value.copy(camera.position);
+    uni.uInvProj.value.copy(camera.projectionMatrixInverse);
+    uni.uCamWorld.value.copy(camera.matrixWorld);
+    uni.uViewProj.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    sprayUni.uScale.value = uni.uRes.value.y / (2 * Math.tan(cam.fov * Math.PI / 360));
+
+    if (s.storm) { const f = flashAt(t); uni.uFlash.value = f.f; uni.uFlashDir.value.fromArray(f.dir); }
+    updateSpray(t, st.spray);
+    updateLights(mulMTV(R, [camera.position.x, camera.position.y - st.heave, camera.position.z]));
+
+    // keep the shadow camera wrapped around the boat
+    const sd = uni.uSunDir.value, r = hull.radius * 1.2;
+    const c = new THREE.Vector3(hull.bound[0], hull.bound[1] + st.heave, 0);
+    sun.target.position.copy(c);
+    sun.position.copy(c).addScaledVector(sd, r * 2.5);
+    sun.target.updateMatrixWorld();
+
+    renderer.setRenderTarget(hdr);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear(true, true, true);
+    renderer.render(oceanScene, orthoCam);
+    renderer.render(boatScene, camera);
+    renderer.setRenderTarget(null);
+    renderer.render(postScene, orthoCam);
   }
 
   const hud = document.getElementById('hud');
@@ -1086,10 +1372,18 @@ void main() {
   function drawHud() {
     hud.style.display = hudOn ? 'block' : 'none';
     if (!hudOn) return;
-    hud.innerHTML = `<b>${BOATS[boatName].label}</b> &middot; ${SCENES[sceneName].label} &middot; ${viewName} view<br>` +
-      `loop ${LOOP}s &middot; t = ${(clock % LOOP).toFixed(1)}s &middot; ${fpsAvg.toFixed(0)} fps &middot; ${canvas.width}&times;${canvas.height}<br>` +
+    const src = currentModel ? '3D model' : (models[boatName] instanceof Promise ? 'loading model…' : 'built-in model');
+    hud.innerHTML = `<b>${BOATS[boatName].label}</b> (${src}) &middot; ${SCENES[sceneName].label} &middot; ${viewName} view<br>` +
+      `loop ${LOOP}s &middot; t = ${(clock % LOOP).toFixed(1)}s &middot; ${fpsAvg.toFixed(0)} fps &middot; ${uni.uRes.value.x}&times;${uni.uRes.value.y}<br>` +
       `<kbd>B</kbd> boat &nbsp; <kbd>S</kbd> sky &amp; sea &nbsp; <kbd>C</kbd> camera &nbsp; <kbd>F</kbd> fullscreen<br>` +
-      `<kbd>R</kbd> record one seamless loop (.webm) &nbsp; <kbd>H</kbd> hide`;
+      `<kbd>R</kbd> record one seamless loop (.webm) &nbsp; <kbd>H</kbd> hide<br>` +
+      `Drop a .glb file here to use it as this boat` + (currentModel ? ` &nbsp; <kbd>[</kbd> <kbd>]</kbd> waterline` : '');
+  }
+  const toastEl = document.getElementById('toast');
+  let toastTimer = 0;
+  function toast(msg) {
+    toastEl.textContent = msg; toastEl.style.display = 'block';
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 6000);
   }
 
   function frame(now) {
@@ -1149,11 +1443,38 @@ void main() {
     }
     else if (k === 's') { sceneName = next(SCENE_NAMES, sceneName); applyScene(); drawHud(); }
     else if (k === 'c') { viewName = next(VIEWS, viewName); drawHud(); }
+    else if ((k === '[' || k === ']') && currentModel) {
+      // sink or raise the 3D model, to find its waterline
+      const b = BOATS[boatName];
+      waterlineOverride[b.label] = Math.max(0, currentModel.waterline + (k === ']' ? .1 : -.1));
+      models[boatName] = prepareModel(currentModel.root, b);
+      showBoat();
+      toast(`Waterline ${models[boatName].waterline.toFixed(1)} m above the keel. Keep it with ?boat=${boatName}&waterline=${models[boatName].waterline.toFixed(1)}`);
+    }
+  });
+  // try a model without packing it: drop a .glb onto the page
+  addEventListener('dragover', e => e.preventDefault());
+  addEventListener('drop', async e => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    try {
+      const m = prepareModel(await parseGLB(await file.arrayBuffer()), BOATS[boatName]);
+      models[boatName] = m; showBoat();
+      toast(`Using ${file.name} as the ${BOATS[boatName].label.toLowerCase()} for this session. To keep it, save it as models/${boatName}.glb and run tools/pack-models.mjs.`);
+    } catch (err) {
+      toast(`Could not read ${file.name}: use a binary glTF (.glb) file.`);
+    }
   });
   document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+  resize();
+  applyBoat();
+  applyScene();
   drawHud();
-  if (P.has('still')) { resize(); render(FREEZE ?? 0); document.title = 'ready'; }
-  else requestAnimationFrame(t => { last = t; frame(t); });
+  if (P.has('still')) {
+    Promise.resolve(models[boatName]).then(() => { resize(); render(FREEZE ?? 0); document.title = 'ready'; });
+  } else requestAnimationFrame(t => { last = t; frame(t); });
   window.__ocean = { render, LOOP, setScale: s => { fixedScale = scale = s; resize(); } };
 })();
 </script>

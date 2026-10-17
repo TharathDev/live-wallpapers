@@ -1,0 +1,13 @@
+{
+  "name": "ocean-run-tools",
+  "private": true,
+  "description": "Rebuilds vendor/three.bundle.js. Only needed if you want to change the three.js version.",
+  "scripts": {
+    "build-three": "esbuild three-entry.js --bundle --minify --format=iife --global-name=THREE --outfile=../vendor/three.bundle.js",
+    "pack-models": "node pack-models.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.0",
+    "three": "0.170.0"
+  }
+}
