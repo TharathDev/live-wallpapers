@@ -188,10 +188,17 @@ jobs:
           gh release upload videos "result/$NAME" --clobber
       - name: Store in result/
         run: |
+          # GitHub refuses files over 100 MB: the release keeps the full-quality video, and
+          # result/ gets a copy re-encoded (two-pass) to fit in about 90 MB
           size=$(stat -c %s "result/$NAME")
           if [ "$size" -gt 95000000 ]; then
-            echo "::warning::$NAME is $((size / 1000000)) MB, over GitHub's file limit, so it is only in the videos release"
-            exit 0
+            dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "result/$NAME")
+            kbps=$(awk -v d="$dur" 'BEGIN { printf "%d", 88000000 * 8 / d / 1000 }')
+            echo "$NAME is $((size / 1000000)) MB; re-encoding at ${kbps} kbit/s for result/"
+            enc="-c:v libx264 -preset medium -b:v ${kbps}k -maxrate $((kbps * 3 / 2))k -bufsize $((kbps * 2))k -bf 0 -g 60 -pix_fmt yuv420p -color_primaries bt709 -color_trc bt709 -colorspace bt709 -an"
+            ffmpeg -y -loglevel error -i "result/$NAME" $enc -pass 1 -passlogfile /tmp/x264 -f null /dev/null
+            ffmpeg -y -loglevel error -i "result/$NAME" $enc -pass 2 -passlogfile /tmp/x264 -movflags +faststart -tag:v avc1 /tmp/small.mp4
+            mv /tmp/small.mp4 "result/$NAME"
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -208,6 +215,6 @@ jobs:
           {
             echo "### $NAME"
             echo "- Download: [$NAME]($url)"
-            echo "- In the repository: \`result/$NAME\` (if under 95 MB)"
+            echo "- In the repository: \`result/$NAME\` (re-encoded to fit GitHub's 100 MB limit if it was larger)"
             echo "- $FRAMES frames, loops seamlessly. Import it into Muro as your own video."
           } >> "$GITHUB_STEP_SUMMARY"
