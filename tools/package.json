@@ -1,13 +1,15 @@
 {
   "name": "ocean-run-tools",
   "private": true,
-  "description": "Rebuilds vendor/three.bundle.js. Only needed if you want to change the three.js version.",
+  "description": "Rebuilds the bundled libraries in vendor/. Only needed to change their versions.",
   "scripts": {
     "build-three": "esbuild three-entry.js --bundle --minify --format=iife --global-name=THREE --outfile=../vendor/three.bundle.js",
-    "pack-models": "node pack-models.mjs"
+    "pack-models": "node pack-models.mjs",
+    "build-mp4": "esbuild mp4-entry.js --bundle --minify --format=iife --global-name=Mp4Muxer --outfile=../vendor/mp4-muxer.js"
   },
   "devDependencies": {
     "esbuild": "0.24.0",
-    "three": "0.170.0"
+    "three": "0.170.0",
+    "mp4-muxer": "5.1.5"
   }
 }

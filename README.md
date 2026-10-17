@@ -80,7 +80,7 @@ Open `index.html` in a browser. It is self-contained and works from `file://` wi
 | `S` | Next sky and sea |
 | `C` | Next camera |
 | `F` | Fullscreen |
-| `R` | Record exactly one loop to a `.webm` video, starting at the loop seam |
+| `R` | Save exactly one loop as an `.mp4` video that repeats seamlessly (see below) |
 | `[` `]` | Sink or raise a 3D model by 10 cm |
 | `H` | Show or hide the info overlay |
 
@@ -89,9 +89,15 @@ Open `index.html` in a browser. It is self-contained and works from `file://` wi
 Point your wallpaper app at `index.html` with the options you like, for example `index.html?boat=galleon&scene=sunset`.
 
 - **Windows:** [Lively Wallpaper](https://www.rocksdanister.com/lively/) (free). Choose *Add wallpaper*, then pick `index.html`, or paste the GitHub Pages URL.
-- **macOS:** [Plash](https://sindresorhus.com/plash) (free). Add a website pointing at the file or the hosted URL.
+- **macOS with Muro, or any app that only plays videos:** save the loop as a video first.
+  1. Open `index.html` in **Chrome** or **Safari** and set it up the way you want with `B`, `S` and `C`, or with a link such as `index.html?boat=yacht&scene=sunset`.
+  2. Press `R`. The page renders the loop frame by frame using your Mac's graphics card. A progress badge shows in the corner, and it downloads `ocean-run-….mp4` when done.
+  3. In Muro, import that `.mp4` as your own video.
+
+  The video is H.264 at your screen's full resolution and 30 fps. It holds exactly one loop and leaves out the duplicate seam frame, so it repeats with no visible jump. Use a 30-second loop (`?loop=30`) for a smaller file. Change the frame rate with `?recfps=60` and the size with `?recw=2560&rech=1600`.
+- **macOS:** [Plash](https://sindresorhus.com/plash) (free) shows the live page itself. Add a website pointing at the file or the hosted URL.
 - **Linux:** [Hidamari](https://github.com/jeffshee/hidamari) or Komorebi (web page mode). On KDE, use an HTML wallpaper plugin.
-- **Video wallpaper apps:** press `R` and wait one loop. The saved `.webm` loops seamlessly in any player that repeats video, such as Wallpaper Engine, VLC, or Hidamari's video mode. For a crisp recording, open with `?scale=1` first.
+- **Other video wallpaper apps** (Wallpaper Engine, Hidamari's video mode, VLC): press `R` as above and use the `.mp4`. In browsers without video encoding (WebCodecs), `R` falls back to a real-time `.webm` recording.
 
 ## URL options
 
@@ -109,6 +115,7 @@ Point your wallpaper app at `index.html` with the options you like, for example 
 | `spray` | `1` | Bow spray multiplier. `0` turns it off. |
 | `seed` | `7` | Different random sea |
 | `grain` | `2` | Film grain strength. `0` turns it off. |
+| `recfps`, `recw`, `rech` | `30`, screen size | Frame rate and size of the video saved with `R` |
 | `ui` | | `1` shows the overlay on start |
 | `t`, `still` | | `t=12&still=1` renders one fixed frame, for screenshots |
 | `waterline`, `flip`, `length` | | Placement of a 3D model; see [Use real 3D boat models](#use-real-3d-boat-models) |
@@ -131,7 +138,7 @@ Each frame takes three passes:
 2. [three.js](https://threejs.org) draws the 3D model, spray and nav lights, depth-tested against the sea.
 3. A final pass applies tone mapping and colour grading.
 
-three.js is bundled in `vendor/three.bundle.js` as a plain script so it works offline and from disk. To rebuild it, run `cd tools && npm install && npm run build-three`.
+three.js and [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) are bundled in `vendor/` as plain scripts so they work offline and from disk. To rebuild them, run `cd tools && npm install && npm run build-three && npm run build-mp4`.
 
 ## Performance
 

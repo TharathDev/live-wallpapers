@@ -699,6 +699,7 @@ void main() {
 </script>
 
 <script src="vendor/three.bundle.js"></script>
+<script src="vendor/mp4-muxer.js"></script>
 <script src="models/models.js"></script>
 <script>
 (() => {
@@ -1376,7 +1377,7 @@ void main() {
     hud.innerHTML = `<b>${BOATS[boatName].label}</b> (${src}) &middot; ${SCENES[sceneName].label} &middot; ${viewName} view<br>` +
       `loop ${LOOP}s &middot; t = ${(clock % LOOP).toFixed(1)}s &middot; ${fpsAvg.toFixed(0)} fps &middot; ${uni.uRes.value.x}&times;${uni.uRes.value.y}<br>` +
       `<kbd>B</kbd> boat &nbsp; <kbd>S</kbd> sky &amp; sea &nbsp; <kbd>C</kbd> camera &nbsp; <kbd>F</kbd> fullscreen<br>` +
-      `<kbd>R</kbd> record one seamless loop (.webm) &nbsp; <kbd>H</kbd> hide<br>` +
+      `<kbd>R</kbd> save one seamless loop as a video (.mp4) &nbsp; <kbd>H</kbd> hide<br>` +
       `Drop a .glb file here to use it as this boat` + (currentModel ? ` &nbsp; <kbd>[</kbd> <kbd>]</kbd> waterline` : '');
   }
   const toastEl = document.getElementById('toast');
@@ -1388,6 +1389,7 @@ void main() {
 
   function frame(now) {
     requestAnimationFrame(frame);
+    if (exporting) return;
     if (FPS < 60 && now - lastDraw < 1000 / FPS - 2) return;
     let dt = Math.min(0.1, (now - last) / 1000);
     last = now; lastDraw = now;
@@ -1407,9 +1409,70 @@ void main() {
     if (hudOn && (now | 0) % 4 === 0) drawHud();
   }
 
-  // ------------------------------------------------------------ record one exact loop
-  let recorder = null;
-  function record() {
+  // ------------------------------------------------------------ export one exact loop as a video
+  // MP4 (H.264): every frame is rendered at a fixed time step and encoded with WebCodecs, so the
+  // video is exactly one loop long, plays seamlessly on repeat, and is smooth however slow the
+  // GPU is. Video-only wallpaper apps (Muro, Wallpaper Engine, ...) can use it as-is.
+  let exporting = false, recorder = null;
+  const recBadge = document.getElementById('rec');
+  const even = n => Math.max(2, Math.round(n / 2) * 2);
+  async function exportMP4() {
+    const fps = num('recfps', 30);
+    const dpr = window.devicePixelRatio || 1;
+    let w = even(num('recw', Math.min(3840, screen.width * dpr))), h = even(num('rech', w * screen.height / screen.width));
+    const frames = Math.round(LOOP * fps);
+    // H.264 plays everywhere, including Apple's player; ?codec=vp9 is for browsers without it
+    const vp9 = P.get('codec') === 'vp9';
+    const codecs = vp9 ? ['vp09.00.51.08', 'vp09.00.41.08'] : ['avc1.640034', 'avc1.640033', 'avc1.640028'];
+    let config = null;
+    for (const codec of codecs) {
+      const c = { codec, width: w, height: h, bitrate: Math.round(w * h * fps * .25), framerate: fps, ...(vp9 ? {} : { avc: { format: 'avc' } }) };
+      if ((await VideoEncoder.isConfigSupported(c)).supported) { config = c; break; }
+    }
+    if (!config && w > 1920) {            // fall back to 1080p if this browser can't encode the full size
+      h = even(h * 1920 / w); w = 1920;
+      const c = { codec: codecs[codecs.length - 1], width: w, height: h, bitrate: Math.round(w * h * fps * .25), framerate: fps, ...(vp9 ? {} : { avc: { format: 'avc' } }) };
+      if ((await VideoEncoder.isConfigSupported(c)).supported) config = c;
+    }
+    if (!config) return false;
+    exporting = true;
+    const muxer = new Mp4Muxer.Muxer({ target: new Mp4Muxer.ArrayBufferTarget(), video: { codec: vp9 ? 'vp9' : 'avc', width: w, height: h, frameRate: fps }, fastStart: 'in-memory' });
+    let failed = null;
+    const encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: e => { failed = e; } });
+    encoder.configure(config);
+    const prevScale = scale;
+    renderer.setSize(w, h, false); hdr.setSize(w, h); uni.uRes.value.set(w, h);
+    try {
+      for (let i = 0; i < frames && !failed; i++) {
+        render(i * LOOP / frames);                      // frame `frames` would equal frame 0, so it's left out
+        const vf = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
+        encoder.encode(vf, { keyFrame: i % (fps * 2) === 0 });
+        vf.close();
+        recBadge.textContent = `Rendering video ${Math.floor(100 * i / frames)}%`;
+        recBadge.style.display = 'block';
+        while (encoder.encodeQueueSize > 4) await new Promise(r => setTimeout(r, 5));
+        if (i % 4 === 0) await new Promise(r => setTimeout(r, 0));   // keep the page responsive
+      }
+      await encoder.flush();
+      if (failed) throw failed;
+      muxer.finalize();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([muxer.target.buffer], { type: 'video/mp4' }));
+      a.download = `ocean-run-${boatName}-${sceneName}-${viewName}-${LOOP}s-${w}x${h}.mp4`;
+      a.click();
+      toast(`Saved ${a.download}: ${LOOP} s, ${w}×${h}, ${fps} fps. It loops seamlessly.`);
+    } catch (e) {
+      toast(`Video export failed: ${e.message || e}`);
+    } finally {
+      encoder.state !== 'closed' && encoder.close();
+      recBadge.style.display = 'none'; recBadge.textContent = 'REC';
+      scale = prevScale; resize();
+      exporting = false; last = performance.now();
+    }
+    return true;
+  }
+  // Fallback for browsers without WebCodecs: a real-time .webm recording of one loop.
+  function recordWebm() {
     if (recorder || !canvas.captureStream || !window.MediaRecorder) return;
     const stream = canvas.captureStream(60);
     const type = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
@@ -1421,17 +1484,22 @@ void main() {
       a.href = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
       a.download = `ocean-run-${boatName}-${sceneName}-${viewName}-${LOOP}s.webm`;
       a.click();
-      recorder = null; document.getElementById('rec').style.display = 'none';
+      recorder = null; recBadge.style.display = 'none';
     };
     clock = 0;   // start exactly at the loop seam
     recorder.start();
-    document.getElementById('rec').style.display = 'block';
+    recBadge.style.display = 'block';
     setTimeout(() => recorder && recorder.stop(), LOOP * 1000);
+  }
+  async function record() {
+    if (exporting || recorder) return;
+    if (window.VideoEncoder && window.Mp4Muxer && P.get('webm') !== '1' && await exportMP4()) return;
+    recordWebm();
   }
 
   const next = (list, cur) => list[(list.indexOf(cur) + 1) % list.length];
   addEventListener('keydown', e => {
-    if (recorder) return;
+    if (recorder || exporting) return;
     const k = e.key.toLowerCase();
     if (k === 'h') { hudOn = !hudOn; drawHud(); }
     else if (k === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); }
@@ -1475,7 +1543,11 @@ void main() {
   if (P.has('still')) {
     Promise.resolve(models[boatName]).then(() => { resize(); render(FREEZE ?? 0); document.title = 'ready'; });
   } else requestAnimationFrame(t => { last = t; frame(t); });
-  window.__ocean = { render, LOOP, setScale: s => { fixedScale = scale = s; resize(); } };
+  window.__ocean = {
+    render, LOOP, record,
+    // render one moment at an exact size (used by offline video rendering)
+    renderAt: (t, w, h) => { renderer.setSize(w, h, false); hdr.setSize(w, h); uni.uRes.value.set(w, h); render(t); },
+    setScale: s => { fixedScale = scale = s; resize(); } };
 })();
 </script>
 </body>
